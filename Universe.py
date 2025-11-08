@@ -8,7 +8,7 @@ import pygame
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 FPS = 60
-G = 0.08  # Gravitational constant scaled for the simulation
+G = 6.674e-3  # Gravitational constant scaled for the simulation
 
 # Colors
 BLACK = (0, 0, 0)
@@ -137,28 +137,17 @@ class Universe:
             stars.append((x, y, radius, brightness, phase))
         return stars
 
-    def _create_random_system(self, existing_stars: List[Star]) -> SolarSystem:
-        star_mass = random.uniform(75_000, 140_000)
-        star_x = SCREEN_WIDTH / 2
-        star_y = SCREEN_HEIGHT / 2
-        min_spacing = 260.0
-        for _ in range(40):
-            candidate_x = random.uniform(140, SCREEN_WIDTH - 140)
-            candidate_y = random.uniform(120, SCREEN_HEIGHT - 120)
-            if all(math.hypot(candidate_x - star.x, candidate_y - star.y) >= min_spacing for star in existing_stars):
-                star_x = candidate_x
-                star_y = candidate_y
-                break
-        else:
-            star_x = random.uniform(140, SCREEN_WIDTH - 140)
-            star_y = random.uniform(120, SCREEN_HEIGHT - 120)
+    def _create_random_system(self) -> SolarSystem:
+        star_mass = random.uniform(8_000, 24_000)
+        star_x = random.uniform(120, SCREEN_WIDTH - 120)
+        star_y = random.uniform(100, SCREEN_HEIGHT - 100)
         star_color = random.choice([YELLOW, RED, BLUE, (255, 220, 150)])
         star = Star(star_mass, star_x, star_y, star_color)
 
         solar_system = SolarSystem(star)
-        for _ in range(random.randint(2, 5)):
-            planet_mass = random.uniform(600, 2_200)
-            distance = random.uniform(star.radius + 140, star.radius + 340)
+        for _ in range(random.randint(2, 6)):
+            planet_mass = random.uniform(40, 160)
+            distance = random.uniform(star.radius + 50, star.radius + 240)
             angle = random.uniform(0, math.tau)
             px = star.x + math.cos(angle) * distance
             py = star.y + math.sin(angle) * distance
@@ -173,12 +162,7 @@ class Universe:
         return solar_system
 
     def refresh_space(self, initial: bool = False) -> None:
-        system_target = random.randint(3, 5)
-        systems: List[SolarSystem] = []
-        for _ in range(system_target):
-            system = self._create_random_system([existing.star for existing in systems])
-            systems.append(system)
-        self.solar_systems = systems
+        self.solar_systems = [self._create_random_system() for _ in range(random.randint(3, 6))]
         self.background_color = self._random_background()
         self.backdrop = self._generate_backdrop()
         if not initial:
@@ -233,13 +217,6 @@ class PlayerShip:
             thrust_ay = math.sin(self.angle) * (self.thrust_force / self.mass)
             self.vx += thrust_ax * dt
             self.vy += thrust_ay * dt
-        if keys[pygame.K_DOWN] or keys[pygame.K_s]:
-            speed = math.hypot(self.vx, self.vy)
-            if speed > 1e-6:
-                retro_ax = -(self.vx / speed) * (self.thrust_force / self.mass)
-                retro_ay = -(self.vy / speed) * (self.thrust_force / self.mass)
-                self.vx += retro_ax * dt
-                self.vy += retro_ay * dt
 
     def apply_gravity(self, universe: "Universe", dt: float) -> None:
         for solar_system in universe.solar_systems:
@@ -258,7 +235,8 @@ class PlayerShip:
     def update(self, dt: float) -> None:
         self.x = (self.x + self.vx * dt) % SCREEN_WIDTH
         self.y = (self.y + self.vy * dt) % SCREEN_HEIGHT
-        # No artificial damping so Newtonian orbits remain intact
+        self.vx *= 0.998
+        self.vy *= 0.998
 
     def collect_energy(self, universe: Universe) -> int:
         collected = 0
@@ -267,7 +245,7 @@ class PlayerShip:
             for planet in solar_system.planets:
                 distance = math.hypot(planet.x - self.x, planet.y - self.y)
                 if distance <= planet.radius + self.collection_radius:
-                    energy_value = max(5, int(planet.mass * 0.18))
+                    energy_value = max(1, int(planet.mass))
                     collected += energy_value
                 else:
                     remaining_planets.append(planet)
