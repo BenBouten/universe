@@ -1,0 +1,20 @@
+"""Shared constants for the Newtonian universe simulation."""
+
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+FPS = 60
+G = 0.08
+
+WORLD_WIDTH = 1000.0
+WORLD_HEIGHT = 800.0
+WORLD_DEPTH = 1400.0
+
+CAMERA_DISTANCE = 600.0
+
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+YELLOW = (255, 255, 0)
+RED = (255, 80, 60)
+GREEN = (0, 255, 160)
+BLUE = (100, 150, 255)
+LIGHT_BLUE = (160, 200, 255)
