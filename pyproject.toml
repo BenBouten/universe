@@ -1,0 +1,11 @@
+[tool.black]
+line-length = 100
+extend-exclude = "Universe\\.py"
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["Universe.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
