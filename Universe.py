@@ -15,7 +15,6 @@ WORLD_HEIGHT = 800.0
 WORLD_DEPTH = 1400.0
 
 CAMERA_DISTANCE = 600.0
-CAMERA_POS = (0.0, 0.0, -CAMERA_DISTANCE)
 
 # Colors
 BLACK = (0, 0, 0)
@@ -62,16 +61,108 @@ def random_unit_vector() -> Tuple[float, float, float]:
     return radius * math.cos(theta), radius * math.sin(theta), z
 
 
+class Camera:
+    """Simple orbital camera that can focus on a target point."""
+
+    def __init__(self) -> None:
+        self.distance = CAMERA_DISTANCE
+        self.yaw = 0.0
+        self.pitch = math.radians(12)
+        self.focus_mode = True
+        self.focus_target = (0.0, 0.0, 0.0)
+        self.mouse_sensitivity = 0.005
+        self.position = (0.0, 0.0, -self.distance)
+        self.forward = (0.0, 0.0, 1.0)
+        self.right = (1.0, 0.0, 0.0)
+        self.up = (0.0, 1.0, 0.0)
+
+    def toggle_focus(self) -> None:
+        self.focus_mode = not self.focus_mode
+
+    def set_focus_target(self, target: tuple[float, float, float]) -> None:
+        self.focus_target = target
+
+    def _calculate_orbit_position(self) -> tuple[float, float, float]:
+        cos_pitch = math.cos(self.pitch)
+        return (
+            self.focus_target[0] + math.sin(self.yaw) * cos_pitch * self.distance,
+            self.focus_target[1] + math.sin(self.pitch) * self.distance,
+            self.focus_target[2] - math.cos(self.yaw) * cos_pitch * self.distance,
+        )
+
+    def _update_basis(self) -> None:
+        tx, ty, tz = self.focus_target
+        cx, cy, cz = self.position
+        forward_vec = (tx - cx, ty - cy, tz - cz)
+        forward = normalize(forward_vec)
+        up_reference = (0.0, 1.0, 0.0)
+        right = cross(forward, up_reference)
+        if vector_length(right) < 1e-5:
+            up_reference = (0.0, 0.0, 1.0)
+            right = cross(forward, up_reference)
+        right = normalize(right)
+        up = cross(right, forward)
+        self.forward = forward
+        self.right = right
+        self.up = up
+
+    def update(self) -> None:
+        if self.focus_mode:
+            self.position = self._calculate_orbit_position()
+        self._update_basis()
+
+    def handle_mouse_motion(self, dx: float, dy: float) -> None:
+        self.yaw += dx * self.mouse_sensitivity
+        self.pitch -= dy * self.mouse_sensitivity
+        pitch_limit = math.radians(85)
+        self.pitch = max(-pitch_limit, min(pitch_limit, self.pitch))
+
+    def depth_of(self, point: tuple[float, float, float]) -> float:
+        dx = point[0] - self.position[0]
+        dy = point[1] - self.position[1]
+        dz = point[2] - self.position[2]
+        return dx * self.forward[0] + dy * self.forward[1] + dz * self.forward[2]
+
+
+camera = Camera()
+
+
 def project_point(x: float, y: float, z: float) -> tuple[float, float, float] | None:
-    dx = x - CAMERA_POS[0]
-    dy = y - CAMERA_POS[1]
-    dz = z - CAMERA_POS[2]
-    if dz <= 1.0:
+    dx = x - camera.position[0]
+    dy = y - camera.position[1]
+    dz = z - camera.position[2]
+    camera_x = dx * camera.right[0] + dy * camera.right[1] + dz * camera.right[2]
+    camera_y = dx * camera.up[0] + dy * camera.up[1] + dz * camera.up[2]
+    camera_z = dx * camera.forward[0] + dy * camera.forward[1] + dz * camera.forward[2]
+    if camera_z <= 1.0:
         return None
-    scale = CAMERA_DISTANCE / dz
-    screen_x = SCREEN_WIDTH / 2 + dx * scale
-    screen_y = SCREEN_HEIGHT / 2 + dy * scale
+    scale = CAMERA_DISTANCE / camera_z
+    screen_x = SCREEN_WIDTH / 2 + camera_x * scale
+    screen_y = SCREEN_HEIGHT / 2 - camera_y * scale
     return screen_x, screen_y, scale
+
+
+def draw_future_path(
+    screen: pygame.Surface, path: Sequence[tuple[float, float, float]]
+) -> None:
+    if not path:
+        return
+    segments: list[tuple[int, int]] = []
+    color = (100, 220, 255)
+    for x, y, z in path:
+        projected = project_point(x, y, z)
+        if projected is None:
+            if len(segments) >= 2:
+                pygame.draw.lines(screen, color, False, segments, 1)
+            segments = []
+            continue
+        px, py, _ = projected
+        segments.append((int(px), int(py)))
+        if len(segments) >= 32:
+            pygame.draw.lines(screen, color, False, segments, 1)
+            segments = [segments[-1]]
+    if len(segments) >= 2:
+        pygame.draw.lines(screen, color, False, segments, 1)
 
 
 def wrapped_delta(origin: float, target: float, limit: float) -> float:
@@ -192,7 +283,7 @@ class SolarSystem:
 
     def draw(self, screen: pygame.Surface) -> None:
         bodies: list[Planet] = [self.star, *self.planets]
-        bodies.sort(key=lambda body: body.z - CAMERA_POS[2], reverse=True)
+        bodies.sort(key=lambda body: camera.depth_of((body.x, body.y, body.z)), reverse=True)
         for body in bodies:
             body.draw(screen)
 
@@ -328,22 +419,26 @@ class PlayerShip:
         self.collection_radius = 26
         self.sector_progress = 0
         self.total_energy = 0
+        self.control_mode = "rotation"
+        self.main_throttle = 0.0
+        self.translation_thrust = self.thrust_force * 0.32
 
     def handle_input(self, keys: pygame.key.ScancodeWrapper, dt: float) -> None:
-        yaw_input = 0.0
-        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            yaw_input -= 1.0
-        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            yaw_input += 1.0
-        self.yaw += yaw_input * self.turn_speed * dt
+        if self.control_mode == "rotation":
+            yaw_input = 0.0
+            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                yaw_input -= 1.0
+            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                yaw_input += 1.0
+            self.yaw += yaw_input * self.turn_speed * dt
 
-        pitch_input = 0.0
-        if keys[pygame.K_DOWN]:
-            pitch_input -= 1.0
-        if keys[pygame.K_UP]:
-            pitch_input += 1.0
-        self.pitch += pitch_input * self.pitch_speed * dt
-        self.pitch = max(-math.pi / 2 + 0.1, min(math.pi / 2 - 0.1, self.pitch))
+            pitch_input = 0.0
+            if keys[pygame.K_DOWN]:
+                pitch_input -= 1.0
+            if keys[pygame.K_UP]:
+                pitch_input += 1.0
+            self.pitch += pitch_input * self.pitch_speed * dt
+            self.pitch = max(-math.pi / 2 + 0.1, min(math.pi / 2 - 0.1, self.pitch))
 
         cos_pitch = math.cos(self.pitch)
         forward = (
@@ -351,12 +446,55 @@ class PlayerShip:
             math.sin(self.pitch),
             math.sin(self.yaw) * cos_pitch,
         )
+        up_reference = (0.0, 1.0, 0.0)
+        right = cross(forward, up_reference)
+        if vector_length(right) < 1e-5:
+            right = (1.0, 0.0, 0.0)
+        right = normalize(right)
+        up_local = normalize(cross(right, forward))
 
-        thrust_input = 0.0
-        if keys[pygame.K_w]:
-            thrust_input += 1.0
-        if keys[pygame.K_s]:
-            thrust_input -= 0.7
+        throttle_rate = 0.9
+        if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+            self.main_throttle = min(1.0, self.main_throttle + throttle_rate * dt)
+        if keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL]:
+            self.main_throttle = max(0.0, self.main_throttle - throttle_rate * dt)
+
+        thrust_acc = self.thrust_force / self.mass
+        self.vx += forward[0] * thrust_acc * self.main_throttle * dt
+        self.vy += forward[1] * thrust_acc * self.main_throttle * dt
+        self.vz += forward[2] * thrust_acc * self.main_throttle * dt
+
+        if self.control_mode == "translation":
+            translation_acc = self.translation_thrust / self.mass
+            forward_input = 0.0
+            if keys[pygame.K_w]:
+                forward_input += 1.0
+            if keys[pygame.K_s]:
+                forward_input -= 1.0
+
+            strafe_input = 0.0
+            if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+                strafe_input += 1.0
+            if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+                strafe_input -= 1.0
+
+            vertical_local = 0.0
+            if keys[pygame.K_UP]:
+                vertical_local += 1.0
+            if keys[pygame.K_DOWN]:
+                vertical_local -= 1.0
+
+            self.vx += forward[0] * translation_acc * forward_input * dt
+            self.vy += forward[1] * translation_acc * forward_input * dt
+            self.vz += forward[2] * translation_acc * forward_input * dt
+
+            self.vx += right[0] * translation_acc * strafe_input * dt
+            self.vy += right[1] * translation_acc * strafe_input * dt
+            self.vz += right[2] * translation_acc * strafe_input * dt
+
+            self.vx += up_local[0] * translation_acc * vertical_local * dt
+            self.vy += up_local[1] * translation_acc * vertical_local * dt
+            self.vz += up_local[2] * translation_acc * vertical_local * dt
 
         vertical_input = 0.0
         if keys[pygame.K_q]:
@@ -364,32 +502,63 @@ class PlayerShip:
         if keys[pygame.K_e]:
             vertical_input -= 1.0
 
-        thrust_acc = self.thrust_force / self.mass
-        self.vx += forward[0] * thrust_acc * thrust_input * dt
-        self.vy += forward[1] * thrust_acc * thrust_input * dt
-        self.vz += forward[2] * thrust_acc * thrust_input * dt
-
-        up_reference = (0.0, 1.0, 0.0)
         vertical_acc = thrust_acc * 0.6
         self.vx += up_reference[0] * vertical_input * vertical_acc * dt
         self.vy += up_reference[1] * vertical_input * vertical_acc * dt
         self.vz += up_reference[2] * vertical_input * vertical_acc * dt
 
-    def apply_gravity(self, universe: "Universe", dt: float) -> None:
+    def toggle_control_mode(self) -> None:
+        self.control_mode = "translation" if self.control_mode == "rotation" else "rotation"
+
+    def cut_throttle(self) -> None:
+        self.main_throttle = 0.0
+
+    def get_position(self) -> tuple[float, float, float]:
+        return self.x, self.y, self.z
+
+    def gravity_acceleration(
+        self, universe: "Universe", x: float, y: float, z: float
+    ) -> tuple[float, float, float]:
+        ax = ay = az = 0.0
         for solar_system in universe.solar_systems:
             bodies: list[Planet] = [solar_system.star, *solar_system.planets]
             for body in bodies:
-                dx = wrapped_delta(self.x, body.x, WORLD_WIDTH)
-                dy = wrapped_delta(self.y, body.y, WORLD_HEIGHT)
-                dz = wrapped_delta(self.z, body.z, WORLD_DEPTH)
+                dx = wrapped_delta(x, body.x, WORLD_WIDTH)
+                dy = wrapped_delta(y, body.y, WORLD_HEIGHT)
+                dz = wrapped_delta(z, body.z, WORLD_DEPTH)
                 r_sq = dx * dx + dy * dy + dz * dz
                 if r_sq < 1.0:
                     continue
                 r = math.sqrt(r_sq)
                 acceleration = G * body.mass / r_sq
-                self.vx += (acceleration * dx / r) * dt
-                self.vy += (acceleration * dy / r) * dt
-                self.vz += (acceleration * dz / r) * dt
+                ax += (acceleration * dx / r)
+                ay += (acceleration * dy / r)
+                az += (acceleration * dz / r)
+        return ax, ay, az
+
+    def predict_future_path(
+        self, universe: "Universe", duration: float = 120.0, step: float = 1.0
+    ) -> list[tuple[float, float, float]]:
+        positions: list[tuple[float, float, float]] = []
+        px, py, pz = self.x, self.y, self.z
+        vx, vy, vz = self.vx, self.vy, self.vz
+        steps = max(1, int(duration / step))
+        for _ in range(steps):
+            ax, ay, az = self.gravity_acceleration(universe, px, py, pz)
+            vx += ax * step
+            vy += ay * step
+            vz += az * step
+            px = wrap_coordinate(px + vx * step, WORLD_WIDTH)
+            py = wrap_coordinate(py + vy * step, WORLD_HEIGHT)
+            pz = wrap_coordinate(pz + vz * step, WORLD_DEPTH)
+            positions.append((px, py, pz))
+        return positions
+
+    def apply_gravity(self, universe: "Universe", dt: float) -> None:
+        ax, ay, az = self.gravity_acceleration(universe, self.x, self.y, self.z)
+        self.vx += ax * dt
+        self.vy += ay * dt
+        self.vz += az * dt
 
     def update(self, dt: float) -> None:
         self.x = wrap_coordinate(self.x + self.vx * dt, WORLD_WIDTH)
@@ -438,6 +607,7 @@ class PlayerShip:
         self.vz = 0.0
         self.yaw = math.pi / 2
         self.pitch = 0.0
+        self.main_throttle = 0.0
         self.sector_progress = 0
 
     def draw(self, screen: pygame.Surface) -> None:
@@ -504,6 +674,8 @@ def main() -> None:
 
     universe = Universe()
     ship = PlayerShip(0.0, 0.0, WORLD_DEPTH * 0.25)
+    camera.set_focus_target(ship.get_position())
+    camera.update()
     sector = 1
     energy_goal = 320
 
@@ -514,6 +686,15 @@ def main() -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_TAB:
+                    ship.toggle_control_mode()
+                elif event.key == pygame.K_f:
+                    camera.toggle_focus()
+                elif event.key == pygame.K_x:
+                    ship.cut_throttle()
+            elif event.type == pygame.MOUSEMOTION and camera.focus_mode:
+                camera.handle_mouse_motion(event.rel[0], event.rel[1])
 
         keys = pygame.key.get_pressed()
         ship.handle_input(keys, dt)
@@ -531,17 +712,29 @@ def main() -> None:
             ship.sector_progress = 0
             universe.refresh_space()
 
+        camera.set_focus_target(ship.get_position())
+        camera.update()
+        future_path = ship.predict_future_path(universe, duration=180.0, step=1.0)
+
         universe.draw(screen)
+        draw_future_path(screen, future_path)
         ship.draw(screen)
 
         hud_lines = [
             f"Sector: {sector}",
             f"Energie verzameld: {ship.sector_progress}/{energy_goal}",
             f"Totale energie: {ship.total_energy}",
-            "Besturing: A/D draaien, W/S thrust",
-            "Pijltjes op/af voor pitch, Q/E stijg/daal",
-            "Vang planeten, ontwijk sterren",
+            f"Modus: {'Rotatie' if ship.control_mode == 'rotation' else 'Translatie'}",
+            f"Hoofdthruster: {int(ship.main_throttle * 100)}% (Shift/Ctrl)",
+            "Q/E stijg/daal, X throttle uit",
+            "Tab: wissel thrusters, F: focus camera",
+            f"Camera focus: {'aan' if camera.focus_mode else 'uit'}",
         ]
+        if ship.control_mode == "rotation":
+            hud_lines.append("Rotatie: A/D yaw, pijltjes pitch")
+        else:
+            hud_lines.append("Translatie: WASD + pijltjes RCS")
+        hud_lines.append("Vang planeten, ontwijk sterren")
         for i, text in enumerate(hud_lines):
             surface = font.render(text, True, WHITE)
             screen.blit(surface, (12, 12 + i * 20))
